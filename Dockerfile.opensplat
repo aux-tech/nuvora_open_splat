@@ -1,0 +1,62 @@
+# =========================================================
+# OpenSplat GPU image (CUDA)
+# Builds OpenSplat from source with LibTorch + CUDA support
+# Used as a sidecar container (same pattern as ODM)
+# =========================================================
+ARG UBUNTU_VERSION=22.04
+ARG CUDA_VERSION=12.1.1
+
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git cmake build-essential ninja-build \
+    libopencv-dev \
+    ca-certificates curl unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG TORCH_VERSION=2.2.1
+ARG CUDA_TAG=cu121
+
+WORKDIR /tmp
+
+RUN curl -fsSL -o libtorch.zip \
+    "https://download.pytorch.org/libtorch/${CUDA_TAG}/libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}%2B${CUDA_TAG}.zip" \
+    && unzip -q libtorch.zip -d /opt \
+    && rm libtorch.zip
+
+ARG CMAKE_CUDA_ARCHITECTURES="70;75;80;86"
+
+COPY . /tmp/opensplat
+
+RUN cmake -S /tmp/opensplat -B /tmp/opensplat/build \
+      -GNinja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH=/opt/libtorch \
+      -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+      -DGPU_RUNTIME=CUDA \
+    && cmake --build /tmp/opensplat/build -j"$(nproc)" \
+    && install -m 0755 /tmp/opensplat/build/opensplat /usr/local/bin/opensplat
+
+# =========================================================
+# Runtime stage
+# =========================================================
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopencv-dev \
+    libgomp1 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/libtorch/lib /opt/libtorch/lib
+ENV LD_LIBRARY_PATH="/opt/libtorch/lib:${LD_LIBRARY_PATH}"
+
+COPY --from=builder /usr/local/bin/opensplat /usr/local/bin/opensplat
+
+RUN useradd -u 1001 -m aux
+USER aux
+
+ENTRYPOINT ["bash", "-lc", "tail -f /dev/null"]

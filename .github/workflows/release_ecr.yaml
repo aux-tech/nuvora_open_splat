@@ -1,0 +1,74 @@
+name: "Release: Build & Push OpenSplat to ECR"
+on:
+  release:
+    types: [published]
+
+env:
+  ECR_REPO: aux/nuvora-opensplat
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET }}
+          aws-region: ${{ secrets.ECR_REGION }}
+
+      - name: Compute variables
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${{ secrets.ECR_REGION }}.amazonaws.com"
+
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+          echo "REGISTRY=$REGISTRY" >> $GITHUB_OUTPUT
+
+      - name: Docker login to ECR
+        shell: bash
+        run: |
+          aws ecr get-login-password --region "${{ secrets.ECR_REGION }}" \
+            | docker login --username AWS --password-stdin "${{ steps.vars.outputs.REGISTRY }}"
+
+      - name: Ensure ECR repository exists
+        shell: bash
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPO }}" 2>/dev/null \
+            || aws ecr create-repository \
+              --repository-name "${{ env.ECR_REPO }}" \
+              --image-scanning-configuration scanOnPush=true
+
+      - name: Build OpenSplat image
+        shell: bash
+        run: |
+          docker build \
+            -f Dockerfile.opensplat \
+            -t "${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.vars.outputs.TAG }}" \
+            -t "${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO }}:latest" \
+            .
+
+      - name: Push OpenSplat image to ECR
+        shell: bash
+        run: |
+          docker push "${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.vars.outputs.TAG }}"
+          docker push "${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO }}:latest"
+
+      - name: Verify pushed image
+        shell: bash
+        run: |
+          APP_DIGEST="$(aws ecr describe-images \
+            --repository-name "${{ env.ECR_REPO }}" \
+            --image-ids imageTag="${{ steps.vars.outputs.TAG }}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)"
+          echo "Pushed: ${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO }}@${APP_DIGEST}"
